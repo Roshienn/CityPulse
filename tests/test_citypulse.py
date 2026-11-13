@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from citypulse.anomaly import iqr_bounds
+from citypulse.anomaly import detect_station_anomalies, iqr_bounds
 from citypulse.benchmark import benchmark
 from citypulse.data_loader import discover_files, load_dataset
 from citypulse.processing import run_parallel, run_serial
@@ -40,3 +40,14 @@ def test_iqr_bounds_and_benchmark_formulas(tmp_path):
     assert row["efficiency_percent"] == row["speedup"] / row["workers"] * 100
     assert (tmp_path / "bench.csv").exists()
 
+
+def test_station_specific_anomalies_return_bounds():
+    data = pd.DataFrame({
+        "datetime": pd.date_range("2020-01-01", periods=8, freq="h"),
+        "station": ["A"] * 4 + ["B"] * 4,
+        "PM2.5": [1, 2, 2, 30, 10, 11, 12, 13],
+    })
+    anomalies, bounds = detect_station_anomalies(data)
+    assert set(bounds["station"]) == {"A", "B"}
+    assert "anomaly_count" in bounds
+    assert set(anomalies["threshold_method"]) == {"station-specific IQR"}

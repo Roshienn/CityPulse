@@ -12,7 +12,8 @@ numeric observations, and writes `datasets/cleaned_citypulse.csv`.
 - Overview of records, stations, PM2.5 distribution, monthly trends, and station comparison.
 - Filterable data explorer with descriptive statistics and CSV export.
 - Hourly, daily, monthly, station hotspot, and weather-correlation analysis.
-- IQR anomaly detection with an exportable anomaly table.
+- IQR anomaly detection with an exportable anomaly table, global or station-specific thresholds,
+  anomaly percentages, and station counts.
 - Identical serial and genuine `ProcessPoolExecutor` parallel aggregation.
 - Configurable worker count and chunk size.
 - Measured benchmark sizes (10,000, 50,000, 100,000, 200,000, and full data), speedup,
@@ -46,3 +47,9 @@ the highest observed average PM2.5, not a geographic heatmap. Interpolation is
 limited to numeric observations within each station file. Wall-clock
 benchmarks depend on machine load and multiprocessing startup overhead; the
 dashboard reports measured values rather than fixed claims.
+
+Overview, Explorer, Pollution Analysis, and Anomaly pages recalculate their
+metrics and charts from the selected date and station filters. Benchmark
+results are medians across the configured repeats after an optional warm-up;
+the parallel wall-clock interval includes worker startup, serialization/data
+transfer, computation, and result aggregation.
