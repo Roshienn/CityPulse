@@ -1,0 +1,21 @@
+# Virtual environment
+venv/
+.venv/
+
+# Python cache
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# macOS
+.DS_Store
+
+# Environment variables
+.env
+
+# Streamlit secrets
+.streamlit/secrets.toml
+
+# Generated datasets
+datasets/cleaned_citypulse.csv
+datasets/benchmark_results.csv
