@@ -4,7 +4,7 @@ from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass
 from multiprocessing import get_context
 from time import perf_counter
-from typing import Dict, Iterable, List, Optional, Tuple
+from typing import Dict, List, Tuple
 
 import pandas as pd
 
@@ -19,6 +19,41 @@ class AnalysisResult:
     anomalies: pd.DataFrame
     records: int
     elapsed_seconds: float = 0.0
+
+
+def analysis_results_equivalent(left: AnalysisResult, right: AnalysisResult) -> bool:
+    """Compare all analytical outputs while ignoring wall-clock timing."""
+    if left.records != right.records or set(left.stats) != set(right.stats):
+        return False
+    for key in left.stats:
+        left_value, right_value = left.stats[key], right.stats[key]
+        if pd.isna(left_value) or pd.isna(right_value):
+            if not (pd.isna(left_value) and pd.isna(right_value)):
+                return False
+        elif isinstance(left_value, (int, float)) and isinstance(right_value, (int, float)):
+            if abs(left_value - right_value) > 1e-9:
+                return False
+        elif left_value != right_value:
+            return False
+    for left_frame, right_frame in [
+        (left.station_summary, right.station_summary),
+        (left.hourly_trend, right.hourly_trend),
+        (left.daily_trend, right.daily_trend),
+        (left.monthly_trend, right.monthly_trend),
+        (left.anomalies, right.anomalies),
+    ]:
+        try:
+            pd.testing.assert_frame_equal(
+                left_frame.reset_index(drop=True),
+                right_frame.reset_index(drop=True),
+                check_dtype=False,
+                check_exact=False,
+                rtol=1e-9,
+                atol=1e-9,
+            )
+        except AssertionError:
+            return False
+    return True
 
 
 def _ensure_datetime(data: pd.DataFrame) -> pd.DataFrame:
@@ -110,13 +145,23 @@ def _result_from_parts(parts: List[Dict[str, object]], elapsed: float, q1: float
 
 def _prepare(data: pd.DataFrame) -> Tuple[pd.DataFrame, float, float]:
     frame = _ensure_datetime(data)
+    if "PM2.5_original_missing" in frame:
+        frame = frame[~frame["PM2.5_original_missing"]]
     frame = frame.dropna(subset=["PM2.5"]).reset_index(drop=True)
     q1, q3 = frame["PM2.5"].quantile([0.25, 0.75]).tolist()
     return frame, float(q1 - 1.5 * (q3 - q1)), float(q3 + 1.5 * (q3 - q1))
 
 
 def _chunks(data: pd.DataFrame, chunk_size: int) -> List[pd.DataFrame]:
+    if chunk_size < 1:
+        raise ValueError("chunk_size must be at least 1")
     return [data.iloc[start:start + chunk_size].copy() for start in range(0, len(data), chunk_size)]
+
+
+def chunk_count(records: int, chunk_size: int) -> int:
+    if chunk_size < 1:
+        raise ValueError("chunk_size must be at least 1")
+    return (records + chunk_size - 1) // chunk_size
 
 
 def run_serial(data: pd.DataFrame, chunk_size: int = 50000) -> AnalysisResult:
@@ -148,4 +193,3 @@ def run_parallel(
     result = _result_from_parts(parts, perf_counter() - started, float(q1), float(q3))
     result.stats["median"] = float(frame["PM2.5"].median())
     return result
-

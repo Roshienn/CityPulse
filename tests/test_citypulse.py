@@ -2,10 +2,10 @@ from pathlib import Path
 
 import pandas as pd
 
-from citypulse.anomaly import detect_station_anomalies, iqr_bounds
+from citypulse.anomaly import detect_anomalies, detect_station_anomalies, iqr_bounds
 from citypulse.benchmark import benchmark
 from citypulse.data_loader import discover_files, load_dataset
-from citypulse.processing import run_parallel, run_serial
+from citypulse.processing import analysis_results_equivalent, run_parallel, run_serial
 
 
 def test_loads_all_station_files_and_retains_station(tmp_path):
@@ -23,10 +23,11 @@ def test_serial_and_parallel_outputs_match():
     data = load_dataset(Path("datasets"), save_cleaned=False).head(2000)
     serial = run_serial(data, 500)
     parallel = run_parallel(data, workers=2, chunk_size=500)
-    assert serial.stats["count"] == parallel.stats["count"]
-    assert serial.stats["anomaly_count"] == parallel.stats["anomaly_count"]
-    pd.testing.assert_frame_equal(serial.station_summary, parallel.station_summary)
-    pd.testing.assert_frame_equal(serial.hourly_trend, parallel.hourly_trend)
+    assert analysis_results_equivalent(serial, parallel)
+    altered = parallel.station_summary.copy()
+    altered.loc[0, "mean"] += 1
+    parallel.station_summary = altered
+    assert not analysis_results_equivalent(serial, parallel)
 
 
 def test_iqr_bounds_and_benchmark_formulas(tmp_path):
@@ -51,3 +52,31 @@ def test_station_specific_anomalies_return_bounds():
     assert set(bounds["station"]) == {"A", "B"}
     assert "anomaly_count" in bounds
     assert set(anomalies["threshold_method"]) == {"station-specific IQR"}
+
+
+def test_missing_sentinel_is_tracked_and_imputed_without_processing_it(tmp_path):
+    source = tmp_path / "PRSA_Data_Test_20130301-20170228.csv"
+    pd.DataFrame({
+        "No": [1, 2, 3, 4], "year": [2013] * 4, "month": [3] * 4,
+        "day": [1] * 4, "hour": [0, 1, 2, 3], "PM2.5": [1, 999, 3, 4],
+        "station": ["Test"] * 4,
+    }).to_csv(source, index=False)
+    (tmp_path / "not_a_station.csv").write_text("PM2.5\n999\n")
+    assert discover_files(tmp_path) == [source]
+    data = load_dataset(tmp_path, save_cleaned=False)
+    assert data["PM2.5_original_missing"].sum() == 1
+    assert data["PM2.5"].isna().sum() == 0
+    assert run_serial(data, 2).records == 3
+
+
+def test_anomaly_detection_handles_empty_and_insufficient_stations():
+    empty = pd.DataFrame(columns=["datetime", "station", "PM2.5"])
+    anomalies, bounds = detect_anomalies(empty)
+    assert anomalies.empty and pd.isna(bounds["lower_bound"])
+    small = pd.DataFrame({
+        "datetime": pd.date_range("2020-01-01", periods=3, freq="h"),
+        "station": ["A", "A", "B"], "PM2.5": [1, 2, 3],
+    })
+    anomalies, station_bounds = detect_station_anomalies(small)
+    assert anomalies.empty
+    assert not station_bounds["eligible"].any()

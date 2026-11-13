@@ -5,7 +5,7 @@ from typing import Iterable, List
 
 import pandas as pd
 
-from .processing import run_parallel, run_serial
+from .processing import analysis_results_equivalent, run_parallel, run_serial
 
 
 def benchmark(
@@ -26,16 +26,21 @@ def benchmark(
         if warmup:
             run_serial(sample, chunk_size)
             run_parallel(sample, workers, chunk_size)
-        serial_runs = [run_serial(sample, chunk_size) for _ in range(repeats)]
-        parallel_runs = [run_parallel(sample, workers, chunk_size) for _ in range(repeats)]
+        serial_runs = []
+        parallel_runs = []
+        for repeat in range(repeats):
+            if repeat % 2 == 0:
+                serial_runs.append(run_serial(sample, chunk_size))
+                parallel_runs.append(run_parallel(sample, workers, chunk_size))
+            else:
+                parallel_runs.append(run_parallel(sample, workers, chunk_size))
+                serial_runs.append(run_serial(sample, chunk_size))
         serial = serial_runs[0]
         parallel = parallel_runs[0]
         serial_time = float(pd.Series([r.elapsed_seconds for r in serial_runs]).median())
         parallel_time = float(pd.Series([r.elapsed_seconds for r in parallel_runs]).median())
         speedup = serial_time / parallel_time if parallel_time else 0.0
         efficiency = speedup / workers * 100
-        serial_mean = serial.stats["mean"]
-        parallel_mean = parallel.stats["mean"]
         rows.append({
             "requested_size": requested, "records": size, "workers": workers,
             "chunk_size": chunk_size,             "serial_seconds": serial_time, "parallel_seconds": parallel_time,
@@ -43,8 +48,7 @@ def benchmark(
             "efficiency_percent": efficiency,
             "serial_throughput": size / serial_time if serial_time else 0.0,
             "parallel_throughput": size / parallel_time if parallel_time else 0.0,
-            "outputs_match": abs(serial_mean - parallel.stats["mean"]) < 1e-9
-                and serial.stats["anomaly_count"] == parallel.stats["anomaly_count"],
+            "outputs_match": analysis_results_equivalent(serial, parallel),
         })
     result = pd.DataFrame(rows)
     output_path.parent.mkdir(parents=True, exist_ok=True)

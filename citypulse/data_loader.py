@@ -1,7 +1,8 @@
 """Dataset loading and cleaning utilities for the Beijing PRSA dataset."""
 
 from pathlib import Path
-from typing import Iterable, List, Optional
+import re
+from typing import List, Optional
 
 import pandas as pd
 
@@ -10,14 +11,12 @@ NUMERIC_COLUMNS = [
     "TEMP", "PRES", "DEWP", "RAIN", "WSPM",
 ]
 REQUIRED_COLUMNS = ["year", "month", "day", "hour", "station", "PM2.5"]
+PRSA_FILE_PATTERN = re.compile(r"^PRSA_Data_[^/]+_20130301-20170228\.csv$")
 
 
 def discover_files(data_dir: Path) -> List[Path]:
     """Return station files, excluding generated cleaned outputs."""
-    return sorted(
-        p for p in Path(data_dir).glob("*.csv")
-        if not p.name.startswith("cleaned_") and not p.name.startswith("benchmark_")
-    )
+    return sorted(p for p in Path(data_dir).glob("*.csv") if PRSA_FILE_PATTERN.match(p.name))
 
 
 def _clean_frame(frame: pd.DataFrame, source: Path) -> pd.DataFrame:
@@ -34,6 +33,8 @@ def _clean_frame(frame: pd.DataFrame, source: Path) -> pd.DataFrame:
     for column in NUMERIC_COLUMNS:
         if column in frame:
             frame[column] = pd.to_numeric(frame[column], errors="coerce")
+            frame[f"{column}_original_missing"] = frame[column].isna() | frame[column].eq(999)
+            frame.loc[frame[column].eq(999), column] = pd.NA
             frame[column] = frame[column].interpolate(limit_direction="both")
     return frame.reset_index(drop=True)
 
@@ -64,8 +65,13 @@ def load_or_create_cleaned(
     """Use a cleaned dataset when it is newer than its source files."""
     output = cleaned_path or Path(data_dir) / "cleaned_citypulse.csv"
     files = discover_files(data_dir)
-    if output.exists() and files and output.stat().st_mtime >= max(p.stat().st_mtime for p in files):
+    required_marker = "PM2.5_original_missing"
+    if (
+        output.exists()
+        and files
+        and output.stat().st_mtime >= max(p.stat().st_mtime for p in files)
+        and required_marker in pd.read_csv(output, nrows=0).columns
+    ):
         data = pd.read_csv(output, parse_dates=["datetime"])
         return data
     return load_dataset(data_dir, output, save_cleaned=True)
-

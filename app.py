@@ -65,6 +65,13 @@ def display_stats(result):
     cards[3].metric("IQR anomalies", f"{stats['anomaly_count']:,}")
 
 
+def valid_observations(frame, column):
+    marker = f"{column}_original_missing"
+    if marker in frame:
+        frame = frame[~frame[marker]]
+    return frame.dropna(subset=[column])
+
+
 data = get_data()
 POLLUTANTS = [column for column in ["PM2.5", "PM10", "SO2", "NO2", "CO", "O3"] if column in data]
 WEATHER = [column for column in ["TEMP", "PRES", "DEWP", "RAIN", "WSPM"] if column in data]
@@ -83,7 +90,7 @@ with st.sidebar:
 st.markdown('<div class="hero"><h1>CITYPULSE</h1><p>Understanding Urban Air Quality Through Data Analysis.</p></div>', unsafe_allow_html=True)
 
 if page == "Overview":
-    filtered = date_filter(data, "overview_dates")
+    filtered = date_filter(valid_observations(data, "PM2.5"), "overview_dates")
     if filtered.empty:
         st.warning("No records fall within this date range.")
         st.stop()
@@ -131,6 +138,14 @@ elif page == "Data Explorer":
     }).sort_values("missing_count", ascending=False)
     st.subheader("Missing-value breakdown")
     st.dataframe(missing, use_container_width=True)
+    original_missing_columns = [column for column in filtered.columns if column.endswith("_original_missing")]
+    if original_missing_columns:
+        original_missing = filtered[original_missing_columns].sum().rename(
+            lambda column: column.removesuffix("_original_missing")
+        ).to_frame("original_missing_count")
+        st.subheader("Original missing-value sentinel counts")
+        st.caption("Original missing values include blank/NA values and the dataset's 999 sentinel. Imputed values remain visible for exploration but are excluded from PM2.5 processing and anomaly analysis.")
+        st.dataframe(original_missing, use_container_width=True)
     summary_columns = [c for c in filtered.select_dtypes(include="number").columns if c not in IDENTIFIERS]
     st.subheader("Descriptive statistics")
     st.dataframe(filtered[summary_columns].describe().T, use_container_width=True)
@@ -138,7 +153,7 @@ elif page == "Data Explorer":
 elif page == "Pollution Analysis":
     selected_pollutant = st.selectbox("Pollutant", POLLUTANTS)
     stations = st.multiselect("Stations", sorted(data.station.unique()), default=sorted(data.station.unique()), key="analysis_stations")
-    filtered = date_filter(data[data.station.isin(stations)], "analysis_dates")
+    filtered = date_filter(valid_observations(data[data.station.isin(stations)], selected_pollutant), "analysis_dates")
     if filtered.empty:
         st.warning("No records match the selected filters.")
         st.stop()
@@ -156,14 +171,19 @@ elif page == "Pollution Analysis":
         st.caption("Daily, monthly, and yearly averages are recalculated from the active station and date filters.")
     with tabs[1]:
         station = filtered.groupby("station")[selected_pollutant].agg(
-            average="mean", maximum="max", high_readings=lambda values: (values >= 75).sum()
+            average="mean", maximum="max"
         ).reset_index().sort_values("average", ascending=False)
+        high_threshold = filtered[selected_pollutant].quantile(0.95)
+        high_counts = filtered.groupby("station")[selected_pollutant].apply(
+            lambda values: (values >= high_threshold).sum()
+        ).rename("high_readings").reset_index()
+        station = station.merge(high_counts, on="station", how="left")
         st.plotly_chart(px.bar(station, x="average", y="station", orientation="h", color="average",
                                title=f"{selected_pollutant} comparison by station", color_continuous_scale="Teal"),
                         use_container_width=True)
         st.subheader("Top five potential hotspots")
         st.dataframe(station.head(5), use_container_width=True)
-        st.caption("Hotspots are stations ranked by observed averages; this dataset has no coordinates, so this is not a geographic incident map.")
+        st.caption(f"High readings are defined as the selected pollutant's 95th percentile ({high_threshold:.2f}); hotspots are station rankings, not geographic incident maps.")
     with tabs[2]:
         correlation_columns = [c for c in POLLUTANTS + WEATHER if c in filtered.columns]
         correlation = filtered[correlation_columns].corr(numeric_only=True)
@@ -173,7 +193,7 @@ elif page == "Pollution Analysis":
         st.caption("Correlation indicates linear association, not causation.")
 
 elif page == "Anomaly Detection":
-    filtered = date_filter(data, "anomaly_dates")
+    filtered = date_filter(valid_observations(data, "PM2.5"), "anomaly_dates")
     method = st.radio("Threshold method", ["Global IQR", "Station-specific IQR"], horizontal=True)
     if filtered.empty:
         st.warning("No records match the selected date range.")
@@ -183,13 +203,19 @@ elif page == "Anomaly Detection":
         station_counts = anomalies.groupby("station").size().rename("anomaly_count").reset_index()
     else:
         anomalies, station_bounds = detect_station_anomalies(filtered)
-        bounds = {"lower_bound": station_bounds["lower_bound"].min(), "upper_bound": station_bounds["upper_bound"].max()}
         station_counts = anomalies.groupby("station").size().rename("anomaly_count").reset_index()
     st.subheader("IQR-based PM2.5 anomalies")
     c1, c2, c3 = st.columns(3)
     c1.metric("Anomalies", f"{len(anomalies):,}")
     c2.metric("Anomaly percentage", f"{len(anomalies) / len(filtered) * 100:.2f}%")
-    c3.metric("Bounds", f"{bounds['lower_bound']:.1f} – {bounds['upper_bound']:.1f}")
+    if method == "Global IQR":
+        c3.metric("Bounds", f"{bounds['lower_bound']:.1f} – {bounds['upper_bound']:.1f}")
+    else:
+        c3.metric("Eligible stations", f"{int(station_bounds['eligible'].sum())}/{len(station_bounds)}")
+        st.dataframe(
+            station_bounds[["station", "records", "eligible", "lower_bound", "upper_bound", "anomaly_count"]],
+            use_container_width=True,
+        )
     st.caption("IQR anomalies are statistically unusual readings relative to the selected population. They are not confirmed pollution incidents.")
     st.plotly_chart(px.bar(station_counts.sort_values("anomaly_count", ascending=False), x="station", y="anomaly_count",
                            title="Anomaly count by station", color="anomaly_count", color_continuous_scale="Teal"),
@@ -257,7 +283,8 @@ elif page == "Performance Comparison":
         fastest_parallel_row = measured.loc[measured["parallel_seconds"].idxmin()]
         highest_speedup_row = measured.loc[measured["speedup"].idxmax()]
         highest_efficiency_row = measured.loc[measured["efficiency_percent"].idxmax()]
-        fastest_mode = "parallel" if fastest_parallel_row["parallel_seconds"] < fastest_parallel_row["serial_seconds"] else "serial"
+        fastest_serial_row = measured.loc[measured["serial_seconds"].idxmin()]
+        fastest_mode = "parallel" if fastest_parallel_row["parallel_seconds"] < fastest_serial_row["serial_seconds"] else "serial"
         summary = st.container()
         with summary:
             st.subheader("Measured performance summary")
@@ -270,7 +297,7 @@ elif page == "Performance Comparison":
             summary_cards[2].metric("Highest parallel efficiency", f"{highest_efficiency_row['efficiency_percent']:.2f}%",
                                     f"{int(highest_efficiency_row['records']):,} records · {highest_efficiency_row['configuration']}")
             summary_cards[3].metric("Fastest mode", fastest_mode.title(),
-                                    f"{fastest_parallel_row['serial_seconds'] - fastest_parallel_row['parallel_seconds']:.3f}s serial − parallel")
+                                    f"{fastest_serial_row['serial_seconds']:.3f}s serial vs {fastest_parallel_row['parallel_seconds']:.3f}s parallel")
             comparison_table = measured[[
                 "requested_size", "dataset_label", "records", "configuration", "serial_seconds", "parallel_seconds",
                 "time_difference_seconds", "time_difference_percent", "speedup",
